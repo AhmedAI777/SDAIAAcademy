@@ -1,0 +1,2 @@
+# SDAIAAcademy
+Full RAG Application
