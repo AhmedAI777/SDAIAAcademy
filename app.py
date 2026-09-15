@@ -14,47 +14,6 @@
 # ]
 # ///
 
-
-Technical Documentation RAG Assistant
-======================================
-
-A small FastAPI RAG service that allows users to upload technical PDF
-documentation and ask questions about the uploaded documents.
-
-The application:
-
-1. Extracts text from PDF documents.
-2. Splits documents into overlapping chunks.
-3. Generates embeddings for each chunk.
-4. Stores the chunks and embeddings in ChromaDB.
-5. Retrieves the most relevant chunks for a user question.
-6. Sends the retrieved context and question to an LLM.
-7. Returns a grounded answer together with source information.
-
-Both the embedding model and chat model are accessed through
-OpenRouter's OpenAI-compatible API.
-
-Run directly with uv:
-
-    uv run app.py
-
-Or with a normal virtual environment:
-
-    uvicorn app:app --reload
-
-Required environment variable:
-
-    OPENROUTER_API_KEY
-
-Optional environment variables:
-
-    OPENROUTER_MODEL
-    OPENROUTER_EMBED_MODEL
-    CHROMA_DB_DIR
-    APP_HOST
-    APP_PORT
-"""
-
 import logging
 import os
 import re
