@@ -2,7 +2,7 @@
 ###Rest_APIs
 curl https://openrouter.ai/api/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer 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" \
+  -H "Authorization: Bearer 
   -d '{
   "model": "openai/gpt-4o",
   "messages": [
@@ -17,7 +17,7 @@ curl https://openrouter.ai/api/v1/chat/completions \
 fetch('https://openrouter.ai/api/v1/chat/completions', {
   method: 'POST',
   headers: {
-    Authorization: 'Bearer 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',
+    Authorization: 'Bearer 
     'HTTP-Referer': '<YOUR_SITE_URL>',
     'X-Title': '<YOUR_SITE_NAME>',
     'Content-Type': 'application/json',
