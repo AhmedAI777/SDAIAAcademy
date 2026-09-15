@@ -7,4 +7,3 @@ pydantic>=2.8
 chromadb>=0.5
 pypdf>=4.3
 python-multipart>=0.0.9
-
