@@ -1,19 +1,3 @@
-
-# /// script
-# requires-python = ">=3.14"
-# dependencies = [
-#     "fastapi>=0.115",
-#     "uvicorn[standard]>=0.30",
-#     "python-dotenv>=1.0",
-#     "numpy>=1.26",
-#     "openai>=1.40",
-#     "pydantic>=2.8",
-#     "chromadb>=0.5",
-#     "pypdf>=4.3",
-#     "python-multipart>=0.0.9",
-# ]
-# ///
-
 import logging
 import os
 import re
