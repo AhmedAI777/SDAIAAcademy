@@ -1,4 +1,4 @@
-```python
+
 # /// script
 # requires-python = ">=3.14"
 # dependencies = [
@@ -757,4 +757,3 @@ if __name__ == "__main__":
         host=settings.app_host,
         port=settings.app_port,
     )
-```
