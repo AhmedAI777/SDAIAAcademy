@@ -14,7 +14,7 @@
 # ]
 # ///
 
-"""
+
 Technical Documentation RAG Assistant
 ======================================
 
