@@ -17,6 +17,7 @@ from fastapi import (
     HTTPException,
     UploadFile,
 )
+from fastapi.responses import HTMLResponse
 from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
