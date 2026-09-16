@@ -21,6 +21,7 @@ from openai import OpenAI, OpenAIError
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from pypdf.errors import PdfReadError
+from sentence_transformers import SentenceTransformer
 
 
 # --------------------------------------------------------------------------
@@ -53,6 +54,7 @@ class Settings:
             "nvidia/nemotron-3-embed-1b:free",
         )
 
+        
         self.chroma_db_dir = os.getenv(
             "CHROMA_DB_DIR",
             "./chroma_db",
@@ -168,36 +170,26 @@ class TextChunker:
 # Embeddings
 # --------------------------------------------------------------------------
 
-class EmbeddingModel:
-    """Generates embeddings through OpenRouter."""
 
-    def __init__(
-        self,
-        client: OpenAI,
-        model: str,
-    ) -> None:
-        self.client = client
-        self.model = model
+class EmbeddingModel:
+    """Generates embeddings locally."""
+
+    def __init__(self, model: str) -> None:
+        self.model = SentenceTransformer(model)
 
     def encode(self, text: str) -> list[float]:
         try:
-            response = self.client.embeddings.create(
-                model=self.model,
-                input=text,
+            embedding = self.model.encode(
+                text,
+                normalize_embeddings=True,
             )
-        except OpenAIError as exc:
-            logger.exception("Embedding call failed")
+        except Exception as exc:
+            logger.exception("Local embedding failed")
             raise RuntimeError(
                 f"Embedding generation failed: {exc}"
             ) from exc
 
-        if not response.data:
-            raise RuntimeError(
-                "Embedding API returned no data."
-            )
-
-        return response.data[0].embedding
-
+        return embedding.tolist()
 
 # --------------------------------------------------------------------------
 # Vector store
