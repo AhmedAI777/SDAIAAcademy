@@ -2,6 +2,7 @@ import logging
 import os
 import re
 import tempfile
+import time
 import uuid
 from contextlib import asynccontextmanager
 from functools import lru_cache
@@ -217,7 +218,8 @@ class ChromaManager:
 
         self.collection = (
             self.client.get_or_create_collection(
-                name="university_knowledge"
+                name="university_knowledge_cosine",
+                metadata={"hnsw:space": "cosine"},
             )
         )
 
@@ -292,6 +294,10 @@ class ChromaManager:
             )
 
         return retrieved
+
+    def count(self) -> int:
+        """Return the total number of indexed chunks."""
+        return self.collection.count()
 
 
 # --------------------------------------------------------------------------
@@ -494,11 +500,30 @@ class QueryRequest(BaseModel):
 
 class Source(BaseModel):
     document: str
-    similarity: float
+    chunk_index: int
+    distance: float
+    cosine_similarity: float
+
+
+class Evaluation(BaseModel):
+    """Retrieval and end-to-end evaluation metrics shown in the UI."""
+
+    chunks_indexed: int
+    chunks_retrieved: int
+
+    best_distance: float
+    average_distance: float
+
+    best_cosine_similarity: float
+    average_cosine_similarity: float
+
+    response_time_seconds: float
+    sources_included: int
 
 
 class QueryResponse(BaseModel):
     answer: str
+    evaluation: Evaluation
     sources: list[Source]
 
 
@@ -642,16 +667,35 @@ def query_university(
     request: QueryRequest,
 ) -> QueryResponse:
     """
-    Retrieve relevant university information and generate
-    a grounded answer.
+    Retrieve relevant university information, generate a grounded answer,
+    and calculate retrieval/system evaluation metrics.
+
+    Metrics:
+        - Chunks Indexed
+        - Chunks Retrieved
+        - Best Distance
+        - Average Distance
+        - Best Cosine Similarity
+        - Average Cosine Similarity
+        - Response Time
+        - Sources Included
     """
+
+    question = request.query.strip()
+
+    if not question:
+        raise HTTPException(
+            status_code=400,
+            detail="Query cannot be empty.",
+        )
 
     service = get_rag_service()
 
+    start_time = time.perf_counter()
+
     try:
-        # top_k stays internal so the API remains simple.
         result = service.ask(
-            question=request.query.strip(),
+            question=question,
             top_k=5,
         )
     except ValueError as exc:
@@ -665,33 +709,120 @@ def query_university(
             detail=str(exc),
         ) from exc
 
+    response_time = time.perf_counter() - start_time
+
+    raw_sources = result.get("sources", [])
+
     sources: list[Source] = []
 
-    for source in result.get("sources", []):
-        distance = source.get("distance")
+    for raw_source in raw_sources:
+        distance = float(
+            raw_source.get("distance", 0.0)
+        )
 
-        # Chroma returns distance. This converts it to a simple
-        # 0-1 relevance score for presentation.
-        if distance is None:
-            similarity = 0.0
-        else:
-            similarity = 1.0 / (1.0 + float(distance))
+        # IMPORTANT:
+        # The Chroma collection is explicitly configured with
+        # hnsw:space = cosine. Therefore:
+        #
+        #     cosine distance = 1 - cosine similarity
+        #
+        # and:
+        #
+        #     cosine similarity = 1 - distance
+        #
+        # We do not use 1/(1+distance), because that is not cosine
+        # similarity.
+        cosine_similarity = max(
+            -1.0,
+            min(
+                1.0,
+                1.0 - distance,
+            ),
+        )
+
+        metadata = raw_source.get("metadata", {})
 
         sources.append(
             Source(
-                document=source.get(
-                    "document",
-                    "Unknown document",
+                document=str(
+                    raw_source.get(
+                        "document",
+                        metadata.get(
+                            "document",
+                            "Unknown document",
+                        ),
+                    )
                 ),
-                similarity=round(similarity, 3),
+                chunk_index=int(
+                    raw_source.get(
+                        "chunk_index",
+                        metadata.get(
+                            "chunk_index",
+                            -1,
+                        ),
+                    )
+                ),
+                distance=round(
+                    distance,
+                    4,
+                ),
+                cosine_similarity=round(
+                    cosine_similarity,
+                    4,
+                ),
             )
         )
+
+    distances = [
+        source.distance
+        for source in sources
+    ]
+
+    similarities = [
+        source.cosine_similarity
+        for source in sources
+    ]
+
+    chunks_indexed = service.chroma_manager.count()
+
+    evaluation = Evaluation(
+        chunks_indexed=chunks_indexed,
+        chunks_retrieved=len(sources),
+
+        best_distance=round(
+            min(distances),
+            4,
+        ) if distances else 0.0,
+
+        average_distance=round(
+            sum(distances) / len(distances),
+            4,
+        ) if distances else 0.0,
+
+        best_cosine_similarity=round(
+            max(similarities),
+            4,
+        ) if similarities else 0.0,
+
+        average_cosine_similarity=round(
+            sum(similarities) / len(similarities),
+            4,
+        ) if similarities else 0.0,
+
+        response_time_seconds=round(
+            response_time,
+            3,
+        ),
+
+        sources_included=len(sources),
+    )
 
     return QueryResponse(
         answer=result.get(
             "answer",
             "I could not find the answer in the provided university documents.",
         ),
+        evaluation=evaluation,
         sources=sources,
     )
 
@@ -721,7 +852,7 @@ app.include_router(router)
 
 
 # --------------------------------------------------------------------------
-# Simple Application Page
+# Application Page
 # --------------------------------------------------------------------------
 
 @app.get("/", response_class=HTMLResponse)
@@ -730,145 +861,293 @@ def root() -> str:
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>University Knowledge Assistant</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 900px;
-            margin: 50px auto;
-            padding: 0 20px;
-            background: #f5f7fa;
-            color: #1f2937;
-        }
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>University Knowledge Assistant</title>
 
-        .card {
-            background: white;
-            padding: 25px;
-            margin-bottom: 20px;
-            border-radius: 12px;
-            border: 1px solid #e5e7eb;
-        }
+<style>
+* { box-sizing: border-box; }
 
-        h1 {
-            margin-bottom: 8px;
-        }
+body {
+    margin: 0;
+    background: #f4f6f8;
+    color: #202938;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+}
 
-        textarea {
-            width: 100%;
-            min-height: 100px;
-            padding: 12px;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
-            font-size: 15px;
-            box-sizing: border-box;
-        }
+.container {
+    width: min(1100px, 94%);
+    margin: 0 auto;
+    padding: 35px 0 60px;
+}
 
-        input[type="file"] {
-            margin: 12px 0;
-        }
+.card {
+    background: #fff;
+    border: 1px solid #e1e5ea;
+    border-radius: 16px;
+    padding: 28px;
+    margin-bottom: 22px;
+}
 
-        button {
-            padding: 11px 18px;
-            border: 0;
-            border-radius: 8px;
-            background: #111827;
-            color: white;
-            cursor: pointer;
-        }
+h1 { margin: 0 0 10px; font-size: 38px; }
+h2 { margin-top: 0; }
+h3 { margin-top: 0; }
 
-        button:disabled {
-            opacity: 0.5;
-        }
+p { color: #667085; line-height: 1.6; }
 
-        #answer {
-            white-space: pre-wrap;
-            line-height: 1.6;
-        }
+textarea {
+    width: 100%;
+    min-height: 120px;
+    padding: 14px;
+    border: 1px solid #ccd3dc;
+    border-radius: 10px;
+    font: inherit;
+    resize: vertical;
+}
 
-        .source {
-            padding: 10px;
-            margin-top: 8px;
-            background: #f9fafb;
-            border-radius: 8px;
-        }
+input[type=file] {
+    width: 100%;
+    margin: 10px 0 14px;
+}
 
-        .status {
-            margin-top: 12px;
-        }
-    </style>
+button {
+    border: 0;
+    border-radius: 9px;
+    padding: 12px 18px;
+    background: #172033;
+    color: white;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+button:disabled {
+    opacity: .55;
+    cursor: not-allowed;
+}
+
+.status {
+    margin-top: 12px;
+    color: #667085;
+}
+
+.error { color: #b42318; }
+.success { color: #067647; }
+
+.answer {
+    white-space: pre-wrap;
+    line-height: 1.75;
+    font-size: 17px;
+}
+
+.divider {
+    border: 0;
+    border-top: 1px solid #e5e7eb;
+    margin: 28px 0;
+}
+
+.metrics {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 12px;
+}
+
+.metric {
+    background: #f8f9fb;
+    border: 1px solid #e4e7eb;
+    border-radius: 11px;
+    padding: 15px;
+}
+
+.label {
+    color: #6b7280;
+    font-size: 13px;
+    line-height: 1.35;
+}
+
+.value {
+    margin-top: 7px;
+    font-size: 20px;
+    font-weight: 750;
+}
+
+.note {
+    margin-top: 5px;
+    color: #8a94a3;
+    font-size: 11px;
+}
+
+.source {
+    background: #f8f9fb;
+    border: 1px solid #e4e7eb;
+    border-radius: 10px;
+    padding: 14px;
+    margin: 9px 0;
+}
+
+.source-title {
+    font-weight: 700;
+}
+
+.source-meta {
+    margin-top: 6px;
+    color: #667085;
+    font-size: 13px;
+}
+
+.explain {
+    margin-top: 16px;
+    color: #667085;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+@media (max-width: 800px) {
+    .metrics { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 500px) {
+    .metrics { grid-template-columns: 1fr; }
+    h1 { font-size: 30px; }
+}
+</style>
 </head>
 
 <body>
+<div class="container">
 
-    <div class="card">
-        <h1>🎓 University Knowledge Assistant</h1>
-        <p>
-            Ask questions using the information contained in your
-            indexed university documents.
-        </p>
+<div class="card">
+    <h1>🎓 University Knowledge Assistant</h1>
+    <p>
+        Here is your RAG system to assist you with your education information.
+    </p>
+</div>
+
+<div class="card">
+    <h2>Upload the PDF file courses</h2>
+    <p>Upload an official university document to the knowledge base.</p>
+
+    <input id="pdf" type="file" accept=".pdf,application/pdf">
+
+    <button id="uploadButton" onclick="uploadPDF()">
+        Upload PDF
+    </button>
+
+    <div id="uploadStatus" class="status"></div>
+</div>
+
+<div class="card">
+    <h2> Ask your Question</h2>
+
+    <textarea
+        id="query"
+        placeholder="Write Your Question"
+    ></textarea>
+
+    <br><br>
+
+    <button id="queryButton" onclick="sendQuery()">
+        Send your Question
+    </button>
+
+    <div id="queryStatus" class="status"></div>
+</div>
+
+<div id="result" class="card" style="display:none;">
+
+    <h2>Answer</h2>
+    <div id="answer" class="answer"></div>
+
+    <hr class="divider">
+
+    <h2>Retrieval Evaluation</h2>
+
+    <div class="metrics">
+
+        <div class="metric">
+            <div class="label">Chunks Indexed</div>
+            <div id="chunksIndexed" class="value">-</div>
+            <div class="note">Total chunks in ChromaDB</div>
+        </div>
+
+        <div class="metric">
+            <div class="label">Chunks Retrieved</div>
+            <div id="chunksRetrieved" class="value">-</div>
+            <div class="note">Top-k chunks returned</div>
+        </div>
+
+        <div class="metric">
+            <div class="label">Best Distance</div>
+            <div id="bestDistance" class="value">-</div>
+            <div class="note">Lower is closer</div>
+        </div>
+
+        <div class="metric">
+            <div class="label">Average Distance</div>
+            <div id="averageDistance" class="value">-</div>
+            <div class="note">Across retrieved chunks</div>
+        </div>
+
+        <div class="metric">
+            <div class="label">Best Cosine Similarity</div>
+            <div id="bestSimilarity" class="value">-</div>
+            <div class="note">Higher is more similar</div>
+        </div>
+
+        <div class="metric">
+            <div class="label">Average Cosine Similarity</div>
+            <div id="averageSimilarity" class="value">-</div>
+            <div class="note">Across retrieved chunks</div>
+        </div>
+
+        <div class="metric">
+            <div class="label">Response Time</div>
+            <div id="responseTime" class="value">-</div>
+            <div class="note">End-to-end query time</div>
+        </div>
+
+        <div class="metric">
+            <div class="label">Sources Included</div>
+            <div id="sourcesIncluded" class="value">-</div>
+            <div class="note">Retrieved sources shown</div>
+        </div>
+
     </div>
 
-    <div class="card">
-        <h2>Upload University PDF</h2>
+    <hr class="divider">
 
-        <input
-            type="file"
-            id="pdf"
-            accept=".pdf,application/pdf"
-        >
+    <h2>Sources</h2>
+    <div id="sources"></div>
 
-        <br>
-
-        <button onclick="uploadPDF()">
-            Upload & Index
-        </button>
-
-        <div id="uploadStatus" class="status"></div>
+    <div class="explain">
+        <strong>Evaluation interpretation:</strong>
+        Chroma is configured with cosine distance. Therefore,
+        cosine similarity = 1 − cosine distance.
+        A lower distance indicates a closer retrieved chunk,
+        while a higher cosine similarity indicates greater semantic similarity.
     </div>
 
-    <div class="card">
-        <h2>Ask a Query</h2>
+</div>
 
-        <textarea
-            id="query"
-            placeholder="Example: What are the prerequisites for Machine Learning?"
-        ></textarea>
-
-        <br><br>
-
-        <button id="queryButton" onclick="sendQuery()">
-            Ask University Assistant
-        </button>
-
-        <div id="queryStatus" class="status"></div>
-    </div>
-
-    <div class="card" id="result" style="display:none;">
-        <h2>Answer</h2>
-
-        <div id="answer"></div>
-
-        <h3>Sources</h3>
-
-        <div id="sources"></div>
-    </div>
+</div>
 
 <script>
 async function uploadPDF() {
-    const fileInput = document.getElementById("pdf");
+    const input = document.getElementById("pdf");
     const status = document.getElementById("uploadStatus");
+    const button = document.getElementById("uploadButton");
 
-    if (!fileInput.files.length) {
+    if (!input.files.length) {
+        status.className = "status error";
         status.textContent = "Please select a PDF.";
         return;
     }
 
     const formData = new FormData();
-    formData.append("document", fileInput.files[0]);
+    formData.append("document", input.files[0]);
 
-    status.textContent = "Indexing PDF...";
+    button.disabled = true;
+    status.className = "status";
+    status.textContent = "Indexing university document...";
 
     try {
         const response = await fetch("/documents/upload", {
@@ -882,14 +1161,18 @@ async function uploadPDF() {
             throw new Error(data.detail || "Upload failed.");
         }
 
+        status.className = "status success";
         status.textContent =
             data.document +
-            " indexed successfully. " +
+            " indexed successfully — " +
             data.chunks_indexed +
             " chunks created.";
 
     } catch (error) {
+        status.className = "status error";
         status.textContent = "Error: " + error.message;
+    } finally {
+        button.disabled = false;
     }
 }
 
@@ -900,11 +1183,13 @@ async function sendQuery() {
     const status = document.getElementById("queryStatus");
 
     if (!query) {
+        status.className = "status error";
         status.textContent = "Please enter a query.";
         return;
     }
 
     button.disabled = true;
+    status.className = "status";
     status.textContent = "Searching university documents...";
 
     try {
@@ -913,9 +1198,7 @@ async function sendQuery() {
             headers: {
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify({
-                query: query
-            })
+            body: JSON.stringify({ query: query })
         });
 
         const data = await response.json();
@@ -927,24 +1210,68 @@ async function sendQuery() {
         document.getElementById("result").style.display = "block";
         document.getElementById("answer").textContent = data.answer;
 
+        const e = data.evaluation;
+
+        document.getElementById("chunksIndexed").textContent =
+            e.chunks_indexed;
+
+        document.getElementById("chunksRetrieved").textContent =
+            e.chunks_retrieved;
+
+        document.getElementById("bestDistance").textContent =
+            Number(e.best_distance).toFixed(4);
+
+        document.getElementById("averageDistance").textContent =
+            Number(e.average_distance).toFixed(4);
+
+        document.getElementById("bestSimilarity").textContent =
+            Number(e.best_cosine_similarity).toFixed(4);
+
+        document.getElementById("averageSimilarity").textContent =
+            Number(e.average_cosine_similarity).toFixed(4);
+
+        document.getElementById("responseTime").textContent =
+            Number(e.response_time_seconds).toFixed(2) + " s";
+
+        document.getElementById("sourcesIncluded").textContent =
+            e.sources_included;
+
         const sources = document.getElementById("sources");
         sources.innerHTML = "";
 
-        data.sources.forEach(source => {
+        data.sources.forEach((source, index) => {
             const div = document.createElement("div");
             div.className = "source";
 
-            div.textContent =
-                source.document +
-                " — Similarity: " +
-                Number(source.similarity).toFixed(3);
+            const title = document.createElement("div");
+            title.className = "source-title";
+            title.textContent =
+                "Source " + (index + 1) +
+                " — " + source.document +
+                " — Chunk " + source.chunk_index;
 
+            const meta = document.createElement("div");
+            meta.className = "source-meta";
+            meta.textContent =
+                "Distance: " +
+                Number(source.distance).toFixed(4) +
+                "  •  Cosine Similarity: " +
+                Number(source.cosine_similarity).toFixed(4);
+
+            div.appendChild(title);
+            div.appendChild(meta);
             sources.appendChild(div);
         });
 
         status.textContent = "";
 
+        document.getElementById("result").scrollIntoView({
+            behavior: "smooth",
+            block: "start"
+        });
+
     } catch (error) {
+        status.className = "status error";
         status.textContent = "Error: " + error.message;
     } finally {
         button.disabled = false;
